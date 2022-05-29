@@ -10,6 +10,8 @@ FROM ghcr.io/graalvm/jdk:latest
 
 WORKDIR /hath
 
-COPY --from=build /go/src/app/launcher .
+RUN mkdir "/manager"
 
-ENTRYPOINT ["/hath/launcher"]
+COPY --from=build /go/src/app/launcher /manager
+
+ENTRYPOINT ["/manager/launcher"]

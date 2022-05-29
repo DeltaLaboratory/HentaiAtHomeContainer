@@ -48,7 +48,7 @@ func download() {
 		fmt.Printf("Failed to Extract Hentai@Home : %s\n", err)
 		os.Exit(15)
 	}
-	fs, err := os.OpenFile("./hath.jar", os.O_CREATE|os.O_WRONLY, 0644)
+	fs, err := os.OpenFile("/hath/hath.jar", os.O_CREATE|os.O_WRONLY, 0644)
 	defer func(fs *os.File) {
 		err := fs.Close()
 		if err != nil {
@@ -86,7 +86,7 @@ func createCredential(clientId, clientKey string) {
 }
 
 func main() {
-	if _, err := os.Stat("./hath.jar"); err != nil {
+	if _, err := os.Stat("/hath/hath.jar"); err != nil {
 		fmt.Println("Hentai@Home is Missing, Download New One...")
 		download()
 	}
@@ -96,7 +96,7 @@ func main() {
 	}
 	createCredential(os.Getenv("CLIENT_ID"), os.Getenv("CLIENT_KEY"))
 	fmt.Println("Starting Hentai@Home Process...")
-	process := exec.Command("java", "-jar", "./hath.jar")
+	process := exec.Command("java", "-jar", "/hath/hath.jar")
 	process.Stdout = os.Stdout
 	process.Stderr = os.Stderr
 	if err := process.Start(); err != nil {
