@@ -1,0 +1,13 @@
+version: "3.8"
+services:
+  hath:
+    image: ghcr.io/deltalaboratory/hath:latest
+    restart: unless-stopped
+    container_name: hath
+    volumes:
+      - "/mnt/data/hentai@home:/hath:rw"
+    ports:
+      - "27018:27018/tcp"
+    environment:
+      - "CLIENT_ID="
+      - "CLIENT_KEY="
