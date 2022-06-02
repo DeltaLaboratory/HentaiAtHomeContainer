@@ -103,6 +103,8 @@ func main() {
 		syscall.SIGINT,
 		syscall.SIGTERM,
 		syscall.SIGKILL)
+	process.Stdout = os.Stdout
+	process.Stderr = os.Stderr
 	// Cert/Domain Name Provider
 	go func() {
 		if strings.ToLower(os.Getenv("GENERATE_CERT")) != "true" {
