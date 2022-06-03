@@ -6,6 +6,8 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/schollz/progressbar/v3"
 	"io"
 	"io/ioutil"
@@ -22,6 +24,130 @@ import (
 
 const HathVersion = "1.6.1"
 
+const LauncherVersion = "0.0.6-dev"
+
+func main() {
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	log.Info().Msgf("Hentai@Home Container Version %s\n", LauncherVersion)
+	log.Info().Msgf("Hentai@Home Client Version %s\n", HathVersion)
+	if _, err := os.Stat("/hath/hath.jar"); err != nil {
+		fmt.Println("Hentai@Home is Missing, Download New One...")
+		download()
+	}
+	if os.Getenv("CLIENT_ID") == "" || os.Getenv("CLIENT_KEY") == "" {
+		fmt.Println("Client ID or Client Key is not set Properly.")
+		os.Exit(30)
+	}
+	createCredential(os.Getenv("CLIENT_ID"), os.Getenv("CLIENT_KEY"))
+	log.Info().Msgf("Starting Hentai@Home Process...")
+	process := exec.Command("java", "-jar", "/hath/hath.jar")
+	if err := process.Start(); err != nil {
+		fmt.Printf("An Error was Occured while Staring Hentai@Home Process : %s\n", err)
+		os.Exit(35)
+	}
+	done := make(chan any)
+	sigChannel := make(chan os.Signal, 1)
+	signal.Notify(sigChannel,
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGKILL)
+	// Cert/Domain Name Provider
+	go func() {
+		if strings.ToLower(os.Getenv("GENERATE_CERT")) != "true" {
+			return
+		}
+		var retry int
+		fmt.Println("Creating PEM-Encoded Certificate...")
+		for {
+			trustStore, err := ioutil.ReadFile("/hath/data/hathcert.p12")
+			if err != nil {
+				retry += 15
+				fmt.Printf("Could Not Read Hath Network Cert, Try After %s", strconv.Itoa(retry))
+				time.Sleep(time.Second * time.Duration(retry))
+				continue
+			}
+			privateKey, cert, ca, err := pkcs12.DecodeChain(trustStore, os.Getenv("CLIENT_KEY"))
+			if err != nil {
+				fmt.Printf("Could Not Decode Trust Store : %s\n", err)
+				return
+			}
+			fmt.Printf("Certificate DN=%s\n", cert.DNSNames[0])
+			fmt.Printf("Certificate SN=%s\n", cert.SerialNumber)
+			fmt.Printf("Certificate Algo=%s\n", cert.PublicKeyAlgorithm)
+			fmt.Printf("Certificate Expire=%s\n", cert.NotAfter.String())
+			if err := os.MkdirAll("/cert", 0644); err != nil {
+				fmt.Printf("Failed to Create Cert File Directory : %s\n", err)
+				return
+			}
+			privateKeyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+			if err != nil {
+				fmt.Printf("Could Not Encode PrivateKey : %s\n", err)
+				return
+			}
+			var caBuffer bytes.Buffer
+			for _, caCert := range ca {
+				caBuffer.Write(pem.EncodeToMemory(&pem.Block{
+					Type:  "CERTIFICATE",
+					Bytes: caCert.Raw,
+				}))
+			}
+			caPEM, err := ioutil.ReadAll(&caBuffer)
+			if err = ioutil.WriteFile("/cert/cert.pem", pem.EncodeToMemory(&pem.Block{
+				Type:  "CERTIFICATE",
+				Bytes: cert.Raw,
+			}), 0644); err != nil {
+				fmt.Printf("Could Not Write Cert PEM : %s\n", err)
+				return
+			}
+			if err = ioutil.WriteFile("/cert/privkey.pem", pem.EncodeToMemory(&pem.Block{
+				Type:  "PRIVATE KEY",
+				Bytes: privateKeyDER,
+			}), 0644); err != nil {
+				fmt.Printf("Could Not Write Private Key : %s\n", err)
+				return
+			}
+			if err = ioutil.WriteFile("/cert/chain.pem", caPEM, 0644); err != nil {
+				fmt.Printf("Could Not Write CA Chain PEM : %s\n", err)
+				return
+			}
+			if err = ioutil.WriteFile("/cert/fullchain.pem", append(pem.EncodeToMemory(&pem.Block{
+				Type:  "CERTIFICATE",
+				Bytes: cert.Raw,
+			}), caPEM...), 644); err != nil {
+				fmt.Printf("Could Not Write Fullchain PEM : %s\n", err)
+				return
+			}
+			err = ioutil.WriteFile("/cert/host", []byte(cert.DNSNames[0]), 0644)
+			if err != nil {
+				fmt.Printf("Could Not Write Hentai@Home Network Host File : %s\n", err)
+				return
+			}
+			fmt.Println("Certificate Generated!")
+			return
+		}
+	}()
+	// Shutdown Handler
+	go func() {
+		<-sigChannel
+		fmt.Println("Shutting Down Hentai@Home...")
+		if err := process.Process.Signal(syscall.SIGINT); err != nil {
+			fmt.Printf("An Error was Occured while Shutting Down Hentai@Home Process : %s\n", err)
+			done <- nil
+			return
+		}
+		_ = process.Wait()
+		done <- nil
+		return
+	}()
+	go func() {
+		err := process.Wait()
+		fmt.Printf("Hentai@Home Process Exited : %s", err.Error())
+		done <- nil
+	}()
+	<-done
+	return
+}
+
 func download() {
 	var fileWriter bytes.Buffer
 
@@ -30,7 +156,7 @@ func download() {
 	defer func() {
 		err := res.Body.Close()
 		if err != nil {
-			fmt.Printf("Failed to Download Hentai@Home : %s\n", err)
+			log.Fatal().Msgf("Failed to Download Hentai@Home : %s\n", err)
 			os.Exit(10)
 		}
 	}()
@@ -79,119 +205,4 @@ func createCredential(clientId, clientKey string) {
 		fmt.Printf("Failed to Write Credential File : %s\n", err)
 		os.Exit(25)
 	}
-}
-
-func main() {
-	if _, err := os.Stat("/hath/hath.jar"); err != nil {
-		fmt.Println("Hentai@Home is Missing, Download New One...")
-		download()
-	}
-	if os.Getenv("CLIENT_ID") == "" || os.Getenv("CLIENT_KEY") == "" {
-		fmt.Println("Client ID or Client Key is not set Properly.")
-		os.Exit(30)
-	}
-	createCredential(os.Getenv("CLIENT_ID"), os.Getenv("CLIENT_KEY"))
-	fmt.Println("Starting Hentai@Home Process...")
-	process := exec.Command("java", "-jar", "/hath/hath.jar")
-	if err := process.Start(); err != nil {
-		fmt.Printf("An Error was Occured while Staring Hentai@Home Process : %s\n", err)
-		os.Exit(35)
-	}
-	done := make(chan any)
-	sigChannel := make(chan os.Signal, 1)
-	signal.Notify(sigChannel,
-		syscall.SIGINT,
-		syscall.SIGTERM,
-		syscall.SIGKILL)
-	process.Stdout = os.Stdout
-	process.Stderr = os.Stderr
-	// Cert/Domain Name Provider
-	go func() {
-		if strings.ToLower(os.Getenv("GENERATE_CERT")) != "true" {
-			return
-		}
-		var retry int
-		fmt.Println("Creating PEM-Encoded Certificate...")
-		for {
-			trustStore, err := ioutil.ReadFile("/hath/data/hathcert.p12")
-			if err != nil {
-				retry += 15
-				fmt.Printf("Could Not Read Hath Network Cert, Try After %s", strconv.Itoa(retry))
-				time.Sleep(time.Second * time.Duration(retry))
-				continue
-			}
-			privateKey, cert, ca, err := pkcs12.DecodeChain(trustStore, os.Getenv("CLIENT_KEY"))
-			if err != nil {
-				fmt.Printf("Could Not Decode Trust Store : %s\n", err)
-				return
-			}
-			fmt.Printf("Certificate DN=%s\n", cert.DNSNames[0])
-			fmt.Printf("Certificate SN=%s\n", cert.SerialNumber)
-			fmt.Printf("Certificate Algo=%s\n", cert.PublicKeyAlgorithm)
-			fmt.Printf("Certificate Expire=%s\n", cert.NotAfter.String())
-			if err := os.MkdirAll("/cert", 0644); err != nil {
-				fmt.Printf("Failed to Create Cert File Directory : %s\n", err)
-				return
-			}
-			privateKeyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
-			if err != nil {
-				fmt.Printf("Could Not Encode PrivateKey : %s\n", err)
-				return
-			}
-			certKey := pem.EncodeToMemory(&pem.Block{
-				Type:  "PRIVATE KEY",
-				Bytes: privateKeyDER,
-			})
-			certPEM := pem.EncodeToMemory(&pem.Block{
-				Type:  "CERTIFICATE",
-				Bytes: cert.Raw,
-			})
-			caPEM := pem.EncodeToMemory(&pem.Block{
-				Type:  "CERTIFICATE",
-				Bytes: ca[0].Raw,
-			})
-			err = ioutil.WriteFile("/cert/cert.pem", certPEM, 0644)
-			if err != nil {
-				fmt.Printf("Could Not Write Cert PEM : %s\n", err)
-				return
-			}
-			err = ioutil.WriteFile("/cert/cert.key", certKey, 0644)
-			if err != nil {
-				fmt.Printf("Could Not Write Private Key : %s\n", err)
-				return
-			}
-			err = ioutil.WriteFile("/cert/ca.pem", caPEM, 0644)
-			if err != nil {
-				fmt.Printf("Could Not Write CA PEM : %s\n", err)
-				return
-			}
-			err = ioutil.WriteFile("/cert/host", []byte(cert.DNSNames[0]), 0644)
-			if err != nil {
-				fmt.Printf("Could Not Write Hentai@Home Network Host File : %s\n", err)
-				return
-			}
-			fmt.Println("Certificate Generated!")
-			return
-		}
-	}()
-	// Shutdown Handler
-	go func() {
-		<-sigChannel
-		fmt.Println("Shutting Down Hentai@Home...")
-		if err := process.Process.Signal(syscall.SIGINT); err != nil {
-			fmt.Printf("An Error was Occured while Shutting Down Hentai@Home Process : %s\n", err)
-			done <- nil
-			return
-		}
-		_ = process.Wait()
-		done <- nil
-		return
-	}()
-	go func() {
-		err := process.Wait()
-		fmt.Printf("Hentai@Home Process Exited : %s", err.Error())
-		// done <- nil
-	}()
-	<-done
-	return
 }
